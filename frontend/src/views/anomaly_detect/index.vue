@@ -72,6 +72,62 @@
       </form>
     </div>
 
+    <section class="v014-panel" data-testid="v014-panel">
+      <header class="page-head">
+        <div>
+          <h3>V014 跨模块联动：导出清单信号核对</h3>
+          <p class="page-desc">读取数据导出文件清单中的信号编号，逐分片核对告警范围，与数据导出侧共用同一份信号表。</p>
+        </div>
+      </header>
+      <div class="filter-bar">
+        <label><span>信号状态</span>
+          <select v-model="signalFilter" data-testid="signal-filter" @change="loadSignals">
+            <option value="">全部</option>
+            <option value="生效">生效</option>
+            <option value="停用">停用</option>
+          </select>
+        </label>
+        <button class="btn" type="button" data-testid="load-signals" @click="loadSignals">读取信号表</button>
+        <label><span>导出任务ID</span><input v-model="reconcileTaskId" data-testid="reconcile-task" placeholder="如 1" style="width:100px" /></label>
+        <label><span>批次号(可选)</span><input v-model="reconcileBatch" data-testid="reconcile-batch" placeholder="留空核对全部批次" /></label>
+        <button class="btn primary" type="button" data-testid="run-reconcile" @click="runReconcile">开始核对</button>
+      </div>
+      <table v-if="signals.length" class="data-table" data-testid="signal-table">
+        <thead><tr><th>信号编号</th><th>规则编号</th><th>监控指标</th><th>告警范围</th><th>信号状态</th><th>信号版本</th></tr></thead>
+        <tbody>
+          <tr v-for="signal in signals" :key="String(signal.id)" :data-testid="`signal-row-${signal.id}`">
+            <td>{{ signal['信号编号'] }}</td>
+            <td>{{ signal['规则编号'] }}</td>
+            <td>{{ signal['监控指标'] }}</td>
+            <td>{{ signal['告警范围'] }}</td>
+            <td>{{ signal['信号状态'] }}</td>
+            <td>{{ signal['信号版本'] }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-if="reconcileResult" data-testid="reconcile-result">
+        <div class="stat-row" style="margin:10px 0">
+          <article class="stat-card"><span class="stat-label">核对分片</span><strong class="stat-value">{{ reconcileResult.total }}</strong></article>
+          <article class="stat-card"><span class="stat-label">一致</span><strong class="stat-value">{{ reconcileResult.matched }}</strong></article>
+          <article class="stat-card"><span class="stat-label">不一致</span><strong class="stat-value">{{ reconcileResult.mismatched }}</strong></article>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>分片编号</th><th>信号编号</th><th>期望告警范围</th><th>清单告警范围</th><th>分片状态</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr v-for="item in reconcileResult.items" :key="String(item.manifest_id)" :data-testid="`reconcile-row-${item.manifest_id}`" :data-matched="String(item.matched)">
+              <td>{{ item.shard_no }}</td>
+              <td>{{ item.signal_no }}</td>
+              <td>{{ item.expected_alert_range || '—' }}</td>
+              <td>{{ item.actual_alert_range }}</td>
+              <td>{{ item.shard_status }}</td>
+              <td>{{ item.remark }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-if="v014Error" class="error-text" data-testid="v014-error">{{ v014Error }}</p>
+    </section>
+
     <footer class="page-foot">
       <span>共 {{ total }} 条异常检测记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -184,5 +240,70 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+// ---------------------------------------------------------- V014 跨模块联动
+type SignalRow = Record<string, string | number>
+type ReconcileItem = {
+  manifest_id: number
+  shard_no: string
+  signal_no: string
+  expected_alert_range: string
+  actual_alert_range: string
+  shard_status: string
+  matched: boolean
+  remark: string
+}
+type ReconcileResult = { total: number; matched: number; mismatched: number; items: ReconcileItem[] }
+
+const signals = ref<SignalRow[]>([])
+const signalFilter = ref('')
+const reconcileTaskId = ref('1')
+const reconcileBatch = ref('')
+const reconcileResult = ref<ReconcileResult | null>(null)
+const v014Error = ref('')
+
+async function loadSignals() {
+  v014Error.value = ''
+  try {
+    const query = new URLSearchParams()
+    if (signalFilter.value) query.set('status', signalFilter.value)
+    const response = await request(`${ENDPOINT}/signals?${query.toString()}`)
+    if (!response.ok) throw new Error('信号表读取失败')
+    const payload = await response.json()
+    signals.value = payload.items ?? []
+  } catch (error) {
+    v014Error.value = error instanceof Error ? error.message : '信号表读取失败'
+  }
+}
+
+async function runReconcile() {
+  v014Error.value = ''
+  reconcileResult.value = null
+  const taskId = Number(reconcileTaskId.value)
+  if (!taskId) {
+    v014Error.value = '请填写导出任务 ID'
+    return
+  }
+  try {
+    const response = await request(`${ENDPOINT}/reconcile/export/${taskId}`, {
+      method: 'POST',
+      body: JSON.stringify(reconcileBatch.value ? { batch_no: reconcileBatch.value } : {}),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.detail || payload.message || '核对失败')
+    }
+    reconcileResult.value = payload
+  } catch (error) {
+    v014Error.value = error instanceof Error ? error.message : '核对失败'
+  }
+}
+
+onMounted(() => {
+  void reload()
+  void loadSignals()
+})
 </script>
+
+<style scoped>
+.v014-panel { margin-top: 24px; padding-top: 12px; border-top: 2px dashed var(--border); }
+</style>

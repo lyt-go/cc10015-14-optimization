@@ -75,5 +75,25 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## V014：数据导出分片清单与异常检测联动
+
+数据导出按任务分片生成「导出文件清单」（`export_manifest`），每个分片是独立执行单元：
+
+- **独立成败**：单个分片失败或取消不会中断同批其余分片，清单里分别显示成功、失败、已取消。
+- **整批统一提交**：`POST /api/data_export/manifests/batch` 一次提交同一批次的多条清单，整组结果逐条记录。
+- **原子落库**：分片完成标记与文件元数据（file_name/file_path/file_size/checksum/content_type）
+  在同一事务内写入，缺任一元数据整批回滚，清单不会出现“已完成但无法下载”的条目。
+- **批次重试**：`POST /api/data_export/tasks/{id}/retry` 只重置失败/取消/待处理分片，已完成文件永不覆盖。
+- **单分片取消的两种策略**（`POST /api/data_export/manifests/{id}/cancel`）：
+  - `keep_success`：保留成功分片，取消项单独记录；
+  - `retry_batch`：整批转「待重试」、撤回已发布文件、保留原分片边界。
+- **乐观锁**：分片动作可带 `expected_version`，版本冲突直接拒绝，避免并发覆盖。
+- **未清残留**：清单处理发现“已规划未统一提交”的半成品时按 V014 回滚事务，并写入
+  `v014_transaction_archive` 留档表（`GET /api/data_export/manifests/archive` 可核对）。
+- **跨模块联动**：异常检测通过 `GET /api/anomaly_detect/signals` 读取信号表，
+  `POST /api/anomaly_detect/reconcile/export/{task_id}` 读取清单中的信号编号，
+  逐分片核对告警范围；数据导出侧 `POST /api/data_export/tasks/{id}/reconcile` 同口径复核。
+- **前后端同数据**：工作台与详情抽屉共用 `useExportManifests` 这一份接口数据。
+
 领域：数据工程
 子方向：数据分析与数据应用

@@ -65,6 +65,24 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="anomaly_detect.csv"'})
 
 
+# ------------------------------------------------------------- V014 跨模块联动
+@router.get("/signals")
+def list_signals(
+    status: str | None = Query(default=None, description="按信号状态过滤：生效/停用"),
+    keyword: str | None = Query(default=None, description="按信号编号检索"),
+) -> dict[str, object]:
+    """异常检测信号表：数据导出清单中的信号编号都来自这里。"""
+    items = service.list_signals(status=status, keyword=keyword)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/reconcile/export/{task_id}")
+def reconcile_export(task_id: int, payload: dict[str, object] | None = None) -> dict[str, object]:
+    """V014：读取导出文件清单的信号编号，逐分片核对告警范围。"""
+    batch_no = (payload or {}).get("batch_no")
+    return service.reconcile_export_manifests(task_id, str(batch_no) if batch_no else None)
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条检测规则明细；不存在时给出可读的错误说明。"""

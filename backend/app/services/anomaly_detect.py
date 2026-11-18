@@ -6,6 +6,9 @@ from typing import Any
 from app.store import store
 
 MODULE = "anomaly_detect"
+SIGNAL_MODULE = "anomaly_signal"
+MANIFEST_MODULE = "export_manifest"
+SPEC_VERSION = "V014"
 LIST_FIELDS = ["规则编号", "监控指标", "检测算法", "基线窗口", "波动阈值", "告警级别", "静默时段", "规则版本"]
 REQUIRED_FIELDS = ["规则编号", "监控指标", "检测算法"]
 STATUS_ORDER = ["草稿", "待校验", "已生效", "已停用"]
@@ -91,3 +94,54 @@ class AnomalyDetectService:
                 "latest": latest, "deviation": round(deviation, 4),
                 "threshold": threshold, "is_anomaly": is_anomaly,
                 "message": f"异常检测完成，偏差={deviation:.4f}"}
+
+    # ------------------------------------------------------------- V014 跨模块
+    def list_signals(self, *, status: str | None = None, keyword: str | None = None) -> list[dict[str, Any]]:
+        """读取异常检测信号表，供数据导出清单与核对页面共同使用。"""
+        rows = store.rows(SIGNAL_MODULE)
+        if status:
+            rows = [row for row in rows if row.get("信号状态") == status]
+        if keyword:
+            rows = [row for row in rows if keyword.casefold() in str(row.get("信号编号", "")).casefold()]
+        return rows
+
+    def reconcile_export_manifests(self, task_id: int, batch_no: str | None = None) -> dict[str, Any]:
+        """V014 联动：读取导出文件清单中的信号编号，核对每个分片的告警范围。
+
+        沿调用链找到数据导出清单的落库位置，直接复用同一份信号表数据，
+        保证异常检测侧与数据导出侧核对口径完全一致。
+        """
+        manifests = [m for m in store.rows(MANIFEST_MODULE) if m.get("task_id") == task_id]
+        if batch_no:
+            manifests = [m for m in manifests if m.get("batch_no") == batch_no]
+        if not manifests:
+            return {"ok": False, "message": f"导出任务 {task_id} 没有可核对的清单分片"}
+        signals = {str(row.get("信号编号")): row for row in store.rows(SIGNAL_MODULE)}
+        items: list[dict[str, Any]] = []
+        for manifest in manifests:
+            signal_no = str(manifest.get("signal_no", ""))
+            signal = signals.get(signal_no)
+            expected = str(signal.get("告警范围", "")) if signal else ""
+            actual = str(manifest.get("alert_range", ""))
+            matched = bool(signal) and signal.get("信号状态") == "生效" and expected == actual
+            items.append({
+                "manifest_id": manifest.get("id"),
+                "shard_no": manifest.get("shard_no"),
+                "signal_no": signal_no,
+                "expected_alert_range": expected,
+                "actual_alert_range": actual,
+                "shard_status": manifest.get("shard_status"),
+                "matched": matched,
+                "remark": "核对一致" if matched else "信号缺失/停用或告警范围不一致",
+            })
+        matched_count = sum(1 for item in items if item["matched"])
+        return {
+            "ok": True,
+            "spec_version": SPEC_VERSION,
+            "task_id": task_id,
+            "batch_no": batch_no or "ALL",
+            "total": len(items),
+            "matched": matched_count,
+            "mismatched": len(items) - matched_count,
+            "items": items,
+        }
